@@ -1653,26 +1653,28 @@ for n in range(max_lookahead):
                     additive_probs = [str(float(x)-float(y)) for x, y in zip(additive_probs, additive_probs_0)]
                 g.write(f"{tokens[0]}: " + ", ".join(additive_probs) + "\n") 
 
-#Now computing the vector of probabilities for the next token given a token list is as simple as
-#adding the additive probabilities of the previous n tokens (vectorially), and then exponentiating each element:
-def compute_token_prob(token_dist, tokens):
-    #Initialize the token_prob vector to the first row of the n == 0 table:
-    with open(f"models/token_dist_additive_0.txt", "r") as f:
-        for line in f:
-            tokens = line.split(":")
-            token_prob = [float(x) for x in tokens[1].split(",")]
-            break
+#Load the token_dist_additive_{n}.txt files into memory for future use as the additive_dist table.
+#The additive_dist table is a list of lists of lists, where the first index is the lookahead index,
+#the second index is the current token, and the third index is the predicted token.
+#This table is built by reading in each of the models/token_dist_additive_{n}.txt files:
+def load_additive_dist():
+    additive_dist = []
     for n in range(max_lookahead):
-        if n == 0:
-            continue
-        lookahead_token = tokens[-n]
+        additive_dist.append([])
         with open(f"models/token_dist_additive_{n}.txt", "r") as f:
-            # Find the lookahead_token line, and add the additive probabilities to the token_prob vector:
             for line in f:
                 tokens = line.split(":")
-                if tokens[0] == lookahead_token:
-                    token_prob = [x + float(y) for x, y in zip(token_prob, tokens[1].split(","))]
-                    break
+                additive_dist[n].append([float(x) for x in tokens[1].split(",")])
+    return additive_dist
+
+#Now computing the vector of probabilities for the next token given a token list is as simple as
+#adding the additive probabilities of the previous n tokens (vectorially), and then exponentiating each element:
+def compute_token_prob(additive_token_dist, tokens):
+    #Initialize the token_prob vector to the first row of the additive_token_dist[0] table:
+    token_prob = additive_token_dist[0][0]
+    for n in range(1, max_lookahead):
+        lookahead_token = tokens[-n]
+        token_prob = [x + y for x, y in zip(token_prob, additive_token_dist[n][lookahead_token])]
     #Exponentiate each element of the token_prob vector:
     token_prob = [math.exp(x) for x in token_prob]
     #Normalize the token_prob vector:
