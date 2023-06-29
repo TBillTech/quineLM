@@ -1547,6 +1547,10 @@ def initialize_token_dist(max_token):
     token_dist = [[0] * (max_token + 1) for _ in range(max_token + 1)]
     return token_dist
 
+def initialize_token_dist_0():
+    token_dist = [0] * (len(tokenizer.get_vocab()))
+    return token_dist
+
 def update_token_dist_lookback_n(token_dist, tokens, n):
     for i in range(len(tokens) - n):
         current_token = tokens[i]
@@ -1554,7 +1558,11 @@ def update_token_dist_lookback_n(token_dist, tokens, n):
         for j in range(i + 1, i + n + 1):
             lookahead_token = tokens[j]
             
-            token_dist[current_token][lookahead_token] += 1    
+            token_dist[current_token][lookahead_token] += 1   
+        #However, when n == 0, the above won't do anything, so
+        #just count the total current_token:
+        if n == 0:
+            token_dist[current_token] += 1
 
 max_lookahead = 10
 def update_token_dist(token_dist, tokens):
@@ -1566,7 +1574,7 @@ def update_token_dist(token_dist, tokens):
 count = 0
 token_count = 0
 characters = 0
-token_dist = [initialize_token_dist(len(tokenizer.get_vocab())) for _ in range(max_lookahead)]
+token_dist = [initialize_token_dist_0()] + [initialize_token_dist(len(tokenizer.get_vocab())) for _ in range(max_lookahead)]
 for article in article_generator(zstd_generator(pilenames[0])):
     characters += len(article)
     try:
@@ -1592,21 +1600,39 @@ for article in article_generator(zstd_generator(pilenames[0])):
         for n in range(max_lookahead):
             with open(f"models/token_dist_{n}.txt", "w+") as f:
                 for i in range(len(token_dist[n])):
-                    f.write(f"{i}: " + ", ".join([str(x) for x in token_dist[n][i]]) + "\n") 
+                    # if n == 0, then the file is for just the totals, so the line will be "token: count\n"
+                    if n == 0:
+                        f.write(f"{i}: {token_dist[n][i]}\n")
+                    else:
+                        f.write(f"{i}: " + ", ".join([str(x) for x in token_dist[n][i]]) + "\n") 
 
-#Read back in each token_dist file, and add normalize the rows
+#Read back the n == 0 totals into token_totals for future use:
+with open(f"models/token_dist_0.txt", "r") as f:
+    token_totals = [int(line.split(":")[1]) for line in f]
+sum_total_tokens = sum(token_totals)
+
+#Read back in each token_dist file, and normalize the rows
 #This means that the each count should be replaced by the count divided by the sum of the counts in the row, 
 # and then re-written to the models/token_dist_normalized_{n}.txt file.
 for n in range(max_lookahead):
-    with open(f"models/token_dist_{n}.txt", "r") as f:
-        with open(f"models/token_dist_normalized_{n}.txt", "w+") as g:
-            for line in f:
-                tokens = line.split(":")
-                #Add 1 to all counts so that the probability of a token pair that has never been seen is not 0.
-                probs = [1+int(x) for x in tokens[1].split(",")]
-                total = sum(probs)
-                normalized_counts = [str(x/total) for x in probs]
-                g.write(f"{tokens[0]}: " + ", ".join(normalized_counts) + "\n")
+    if n == 0:
+        # For the n == 0 case, this is the expected conditional prob in general.
+        # For each token A, the expected probability of token B given token A is naively just
+        # the expected probability of token B in general.  
+        # Therefore write out a token_dist_normalize_0.txt file that tracks this:
+        with open(f"models/token_dist_normalized_{n}.txt", "w+") as f:
+            for i in range(len(token_totals)):
+                f.write(f"{i}: {(1+token_totals[i])/(len(token_totals)+sum_total_tokens)}\n")
+    else:         
+        with open(f"models/token_dist_{n}.txt", "r") as f:
+            with open(f"models/token_dist_normalized_{n}.txt", "w+") as g:
+                for line in f:
+                    tokens = line.split(":")
+                    #Add 1 to all counts so that the probability of a token pair that has never been seen is not 0.
+                    probs = [1+int(x) for x in tokens[1].split(",")]
+                    total = sum(probs)
+                    normalized_counts = [str(x/total) for x in probs]
+                    g.write(f"{tokens[0]}: " + ", ".join(normalized_counts) + "\n")
 
 #Create additive versions of the lookaheads by finding the median of the normalized counts for each
 #row, multiplying by the inverse of the median times e, and then taking the natural log.
@@ -1619,14 +1645,26 @@ for n in range(max_lookahead):
                 #Compute the median by getting a sorted copy of the probs, and choosing the length/2 element:
                 median = sorted(probs)[len(probs)//2]
                 additive_probs = [str(math.log(x/median)) for x in probs]
+                #Keep the n == 0 additive_probs_0 for shifting the other additive_probs to a generalized expectation of 0:
+                if n == 0:
+                    additive_probs_0 = additive_probs
+                else:
+                    #Shift the additive_probs to a generalized expectation of 0:
+                    additive_probs = [str(float(x)-float(y)) for x, y in zip(additive_probs, additive_probs_0)]
                 g.write(f"{tokens[0]}: " + ", ".join(additive_probs) + "\n") 
 
 #Now computing the vector of probabilities for the next token given a token list is as simple as
 #adding the additive probabilities of the previous n tokens (vectorially), and then exponentiating each element:
 def compute_token_prob(token_dist, tokens):
-    #Initialize the token_prob vector to all 0s:
-    token_prob = [0] * len(token_dist[0])
+    #Initialize the token_prob vector to the first row of the n == 0 table:
+    with open(f"models/token_dist_additive_0.txt", "r") as f:
+        for line in f:
+            tokens = line.split(":")
+            token_prob = [float(x) for x in tokens[1].split(",")]
+            break
     for n in range(max_lookahead):
+        if n == 0:
+            continue
         lookahead_token = tokens[-n]
         with open(f"models/token_dist_additive_{n}.txt", "r") as f:
             # Find the lookahead_token line, and add the additive probabilities to the token_prob vector:
